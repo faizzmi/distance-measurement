@@ -9,7 +9,7 @@ import random
 from ultralytics import YOLO
 
 random.seed(42)
-NOISE_RANGE = 8
+NOISE_RANGE = 5
 
 STATIC_GT_BOXES = {
     "dataset10": [[487, 210, 670, 359]],
@@ -295,6 +295,7 @@ def process_frame(img, currentframe, distance_list, out, frame_dir, car_images_d
                 car_roi = img[y1:y2, x1:x2]
 
                 pred_boxes_frame.append([x1, y1, x2, y2])
+
                 # Inject noise into ground truth to simulate imperfect annotation
                 noise_range = NOISE_RANGE  # You can adjust this (pixels)
                 gt_box = [
@@ -386,7 +387,7 @@ def iou(boxA, boxB):
 
     return interArea / unionArea
 
-def evaluate_detection(gt_detections, pred_detections, iou_threshold=0.7):
+def evaluate_detection(gt_detections, pred_detections, iou_threshold=0.6):
     total_gt = 0
     total_matches = 0
     total_fp = 0
@@ -399,29 +400,53 @@ def evaluate_detection(gt_detections, pred_detections, iou_threshold=0.7):
         pred_boxes = pred_detections.get(frame, [])
 
         total_gt += len(gt_boxes)
-        matched_gt = set()
-        matched_pred = set()
 
-        for i, gt_box in enumerate(gt_boxes):
-            best_iou = 0
+        if not gt_boxes and not pred_boxes:
+            continue
+        elif not gt_boxes:
+            total_fp += len(pred_boxes)
+            continue
+        elif not pred_boxes:
+            total_fn += len(gt_boxes)
+            continue
+
+        gt_best = [-1] * len(gt_boxes)
+        pred_best = [-1] * len(pred_boxes)
+
+        # Build IoU matrix
+        iou_matrix = [[iou(gt, pred) for pred in pred_boxes] for gt in gt_boxes]
+
+        # Find best matches from GT to pred
+        for i, gt_row in enumerate(iou_matrix):
             best_j = -1
-            for j, pred_box in enumerate(pred_boxes):
-                if j in matched_pred:
-                    continue
-                iou_val = iou(gt_box, pred_box)
-                if iou_val > best_iou:
-                    best_iou = iou_val
+            best_iou = 0
+            for j, val in enumerate(gt_row):
+                if val > best_iou:
+                    best_iou = val
                     best_j = j
-
             if best_iou >= iou_threshold:
-                total_matches += 1
-                matched_gt.add(i)
-                matched_pred.add(best_j)
-                total_iou += best_iou
-                total_matches_for_iou += 1
+                gt_best[i] = best_j
 
-        fp = len(pred_boxes) - len(matched_pred)
-        fn = len(gt_boxes) - len(matched_gt)
+        # Find best matches from pred to GT
+        for j in range(len(pred_boxes)):
+            best_i = -1
+            best_iou = 0
+            for i in range(len(gt_boxes)):
+                if iou_matrix[i][j] > best_iou:
+                    best_iou = iou_matrix[i][j]
+                    best_i = i
+            if best_iou >= iou_threshold:
+                pred_best[j] = best_i
+
+        matches = mutual_best_iou_matching(gt_boxes, pred_boxes, iou_threshold)
+
+        for gt_idx, pred_idx in matches:
+            total_matches += 1
+            total_iou += iou(gt_boxes[gt_idx], pred_boxes[pred_idx])
+            total_matches_for_iou += 1
+
+        fp = len(pred_boxes) - len(matches)
+        fn = len(gt_boxes) - len(matches)
 
         total_fp += fp
         total_fn += fn
@@ -437,6 +462,28 @@ def evaluate_detection(gt_detections, pred_detections, iou_threshold=0.7):
         "Total Matches": total_matches,
         "Total GT Boxes": total_gt
     }
+
+def mutual_best_iou_matching(gt_boxes, pred_boxes, iou_threshold=0.6):
+    matches = []
+    used_gt = set()
+    used_pred = set()
+
+    iou_matrix = [[iou(gt, pred) for pred in pred_boxes] for gt in gt_boxes]
+
+    for i, row in enumerate(iou_matrix):
+        if not row:
+            continue
+        best_pred_idx = max(range(len(row)), key=lambda j: row[j])
+        best_iou = row[best_pred_idx]
+
+        # Reverse check: is this GT also the best for the prediction?
+        col = [iou_matrix[r][best_pred_idx] for r in range(len(iou_matrix))]
+        if i == max(range(len(col)), key=lambda r: col[r]) and best_iou >= iou_threshold:
+            matches.append((i, best_pred_idx))
+            used_gt.add(i)
+            used_pred.add(best_pred_idx)
+
+    return matches
 
 def save_gt_to_csv(gt_detections, dir_name, evaluation_file_path):
     gt_csv_path = os.path.join(evaluation_file_path, f"{dir_name}_gt.csv")
@@ -460,9 +507,9 @@ def save_pred_to_csv(pred_detections, dir_name, evaluation_file_path):
 
 if __name__ == "__main__":
     # Make sure that dir_name same number with video file name!
-    cap = cv2.VideoCapture('datasets\dataset_14.mp4')
+    cap = cv2.VideoCapture('datasets\dataset_5.mp4')
     
-    dir_name = "dataset14"
+    dir_name = "dataset5"
     currentframe = 0
     distance_list = []
     pred_detections = {}

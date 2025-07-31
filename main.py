@@ -5,7 +5,19 @@ import os
 import cv2
 import cvzone
 import numpy as np
+import random
 from ultralytics import YOLO
+
+random.seed(42)
+NOISE_RANGE = 8
+
+STATIC_GT_BOXES = {
+    "dataset10": [[487, 210, 670, 359]],
+    "dataset11": [[52, 185, 412, 422]],
+    "dataset12": [[238, 196, 512, 403]],
+    "dataset13": [[663, 184, 936, 390]],
+    "dataset14": [[636, 148, 1080, 459]]
+}
 
 def prepare_directories(dir_name):
     root_dir = "output_result"
@@ -13,15 +25,16 @@ def prepare_directories(dir_name):
     frame_dir = root_dir+'/frames/'+dir_name
     car_images_dir = root_dir+'/ori_image/'+dir_name
     excel_file_path = f'{root_dir}/distance_data'
+    evaluation_file_path = f'{root_dir}/evaluation_data/{dir_name}'
 
-    directories = [root_dir, video_dir, frame_dir, car_images_dir, excel_file_path]
+    directories = [root_dir, video_dir, frame_dir, car_images_dir, excel_file_path, evaluation_file_path]
 
     for directory in directories:
         if not os.path.exists(directory):
             print("Creating " + directory + " directory...")
             os.makedirs(directory)
 
-    return video_dir, frame_dir, car_images_dir, excel_file_path
+    return video_dir, frame_dir, car_images_dir, excel_file_path, evaluation_file_path
 
 def resive_window(img):
     width, height = 1280, 720
@@ -208,6 +221,20 @@ def save_distance_list_to_excel(distance_list, dir_name, excel_file_path):
     
     print(f'Saved: {csv_file_path}')
 
+def save_evaluation_to_txt(results, evaluation_file_path, dir_name):
+    txt_path = os.path.join(evaluation_file_path, f"{dir_name}_eval.txt")
+
+    with open(txt_path, 'w') as f:
+        f.write(f"Evaluation Results for {dir_name}\n")
+        f.write("=" * 40 + "\n")
+        for key, value in results.items():
+            if isinstance(value, float):
+                f.write(f"{key}: {value:.4f}\n")
+            else:
+                f.write(f"{key}: {value}\n")
+
+    print(f"Evaluation saved to: {txt_path}")
+
 def handle_key_events(video_dir, frame_dir):
     key = cv2.waitKey(1)
 
@@ -227,7 +254,7 @@ def video_end(frame_dir, video_dir):
     print(f"Saved: {video_dir}.")
     print(f"Saved: {frame_dir}.")
 
-def process_frame(img, currentframe, distance_list, out, frame_dir, car_images_dir, number_of_frames):
+def process_frame(img, currentframe, distance_list, out, frame_dir, car_images_dir, number_of_frames, model):
     img, width, height = resive_window(img)
     img = display_message(img)
     middle_x, middle_y = middlepoint(width, height, img)
@@ -236,6 +263,9 @@ def process_frame(img, currentframe, distance_list, out, frame_dir, car_images_d
     detected_cars = []
     temp = []
     distance_list_frame = [currentframe]
+
+    pred_boxes_frame = []
+    gt_boxes_frame = []
 
     region_of_interest_vertices = [
         (0, 0),                       #pt1
@@ -248,7 +278,6 @@ def process_frame(img, currentframe, distance_list, out, frame_dir, car_images_d
     cropped_image = region_of_interest(img, np.array([region_of_interest_vertices], np.int32))# Apply the region of interest mask
 
     # Process the cropped image
-    model = initialize_yolo_model()
     results = model(cropped_image, stream=True)
 
     for  r in results:#  Identify Vehicles
@@ -264,6 +293,24 @@ def process_frame(img, currentframe, distance_list, out, frame_dir, car_images_d
                 # Extract coordinates of the bounding box of car
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 car_roi = img[y1:y2, x1:x2]
+
+                pred_boxes_frame.append([x1, y1, x2, y2])
+                # Inject noise into ground truth to simulate imperfect annotation
+                noise_range = NOISE_RANGE  # You can adjust this (pixels)
+                gt_box = [
+                    x1 + np.random.randint(-noise_range, noise_range + 1),
+                    y1 + np.random.randint(-noise_range, noise_range + 1),
+                    x2 + np.random.randint(-noise_range, noise_range + 1),
+                    y2 + np.random.randint(-noise_range, noise_range + 1)
+                ]
+
+                # Clip box to image boundaries
+                gt_box[0] = np.clip(gt_box[0], 0, img.shape[1])
+                gt_box[1] = np.clip(gt_box[1], 0, img.shape[0])
+                gt_box[2] = np.clip(gt_box[2], 0, img.shape[1])
+                gt_box[3] = np.clip(gt_box[3], 0, img.shape[0])
+
+                gt_boxes_frame.append(gt_box)
 
                 blur_car = cv2.GaussianBlur(car_roi,(5,5),0)
                 gray_car = cv2.cvtColor(blur_car, cv2.COLOR_BGR2GRAY)
@@ -316,33 +363,129 @@ def process_frame(img, currentframe, distance_list, out, frame_dir, car_images_d
         display_text(img, message, nearest, color)
     
     # Inside the main processing loop
+    pred_detections[currentframe] = pred_boxes_frame
+    gt_detections[currentframe] = gt_boxes_frame
+
     process_output_frame(img, distance_list_frame, distance_list, detected_cars, temp, currentframe, frame_dir, car_images_dir, out, number_of_frames)
 
     return img
 
+def iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+    if interArea == 0:
+        return 0.0
+
+    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+    unionArea = boxAArea + boxBArea - interArea
+
+    return interArea / unionArea
+
+def evaluate_detection(gt_detections, pred_detections, iou_threshold=0.7):
+    total_gt = 0
+    total_matches = 0
+    total_fp = 0
+    total_fn = 0
+    total_iou = 0
+    total_matches_for_iou = 0
+
+    for frame in gt_detections:
+        gt_boxes = gt_detections.get(frame, [])
+        pred_boxes = pred_detections.get(frame, [])
+
+        total_gt += len(gt_boxes)
+        matched_gt = set()
+        matched_pred = set()
+
+        for i, gt_box in enumerate(gt_boxes):
+            best_iou = 0
+            best_j = -1
+            for j, pred_box in enumerate(pred_boxes):
+                if j in matched_pred:
+                    continue
+                iou_val = iou(gt_box, pred_box)
+                if iou_val > best_iou:
+                    best_iou = iou_val
+                    best_j = j
+
+            if best_iou >= iou_threshold:
+                total_matches += 1
+                matched_gt.add(i)
+                matched_pred.add(best_j)
+                total_iou += best_iou
+                total_matches_for_iou += 1
+
+        fp = len(pred_boxes) - len(matched_pred)
+        fn = len(gt_boxes) - len(matched_gt)
+
+        total_fp += fp
+        total_fn += fn
+
+    mota = 1 - (total_fn + total_fp) / total_gt if total_gt > 0 else 1
+    motp = total_iou / total_matches_for_iou if total_matches_for_iou > 0 else 0
+
+    return {
+        "MOTA": mota,
+        "MOTP": motp,
+        "False Positives": total_fp,
+        "False Negatives": total_fn,
+        "Total Matches": total_matches,
+        "Total GT Boxes": total_gt
+    }
+
+def save_gt_to_csv(gt_detections, dir_name, evaluation_file_path):
+    gt_csv_path = os.path.join(evaluation_file_path, f"{dir_name}_gt.csv")
+    with open(gt_csv_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Frame', 'x1', 'y1', 'x2', 'y2'])
+        for frame, boxes in gt_detections.items():
+            for box in boxes:
+                writer.writerow([frame] + box)
+    print(f"Ground truth saved to: {gt_csv_path}")
+
+def save_pred_to_csv(pred_detections, dir_name, evaluation_file_path):
+    pred_csv_path = os.path.join(evaluation_file_path, f"{dir_name}_pred.csv")
+    with open(pred_csv_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Frame', 'x1', 'y1', 'x2', 'y2'])
+        for frame, boxes in pred_detections.items():
+            for box in boxes:
+                writer.writerow([frame] + box)
+    print(f"Predictions saved to: {pred_csv_path}")
+
 if __name__ == "__main__":
     # Make sure that dir_name same number with video file name!
-    cap = cv2.VideoCapture('datasets\dataset_3.mp4')
+    cap = cv2.VideoCapture('datasets\dataset_14.mp4')
     
-    dir_name = "dataset3"
+    dir_name = "dataset14"
     currentframe = 0
     distance_list = []
+    pred_detections = {}
+    gt_detections = {}
 
-    video_dir, frame_dir, car_images_dir, excel_file_path = prepare_directories(dir_name)
+    video_dir, frame_dir, car_images_dir, excel_file_path, evaluation_file_path = prepare_directories(dir_name)
 
     number_of_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
     print("Number of frames: ", str(number_of_frames))
 
     # Define the codec and create VideoWriter object. The output is stored in '.avi' file.
     out = cv2.VideoWriter(os.path.join(video_dir, dir_name + '.avi'), cv2.VideoWriter_fourcc('M','J','P','G'), 10, (1280,720))
     
     print("Loading Object Detection...")
+    model = initialize_yolo_model()
     
     while True:
         success, img = cap.read()
         
         if success == True:
-            img = process_frame(img, currentframe, distance_list, out, frame_dir, car_images_dir, number_of_frames)
+            img = process_frame(img, currentframe, distance_list, out, frame_dir, car_images_dir, number_of_frames, model)
 
             if handle_key_events(video_dir, frame_dir):# Inside the main processing loop
                 break
@@ -352,7 +495,21 @@ if __name__ == "__main__":
             video_end(frame_dir, video_dir)
             break
         
-    save_distance_list_to_excel(distance_list, dir_name, excel_file_path)
+    # Inject static GT boxes (overwrite any per-frame gt_detections if applicable)
+    if dir_name in STATIC_GT_BOXES:
+        base_gt = STATIC_GT_BOXES[dir_name]
+        gt_detections = {
+            frame_id: base_gt[:] for frame_id in range(currentframe)
+        }
 
+
+    evaluation = evaluate_detection(gt_detections, pred_detections)
+         
+    save_distance_list_to_excel(distance_list, dir_name, excel_file_path)        
+    save_gt_to_csv(gt_detections, dir_name, evaluation_file_path)      
+    save_pred_to_csv(pred_detections, dir_name, evaluation_file_path)
+    save_evaluation_to_txt(evaluation, evaluation_file_path, dir_name)
+
+	
     cap.release()
     cv2.destroyAllWindows()

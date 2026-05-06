@@ -166,7 +166,7 @@ Error range: 0.32% to 24.22%. Higher error at wide angles where the car width in
 
 | Document | File |
 |---|---|
-| Full Thesis | `fyp.pptx` |
+| Slide | `fyp.pptx` |
 | Source Code | `main.py` |
 
 ---

@@ -130,8 +130,6 @@ Best: dataset_7 at 98% MOTA. Lowest: dataset_1 at 83%, mainly due to occlusion a
 Error range: 0.32% to 24.22%. Higher error at wide angles where the car width in frame deviates significantly from the calibrated reference.
 
 ---
-
-## Demo
 ## Demo
 
 [![Demo Video](https://img.youtube.com/vi/ukzGumsVJ34/maxresdefault.jpg)](https://www.youtube.com/watch?v=ukzGumsVJ34)
